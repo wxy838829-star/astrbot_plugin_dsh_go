@@ -199,7 +199,8 @@ sandbox mode "workspace-write" is requested but no sandbox backend is usable on 
 1. dsh-go 按需求写插件，放到它那边的 `/root/workspace/_plugins/`，打包成 `out.zip`
 2. 插件把 zip 取回来（桥接模式走 HTTP，本机模式直接读磁盘）
 3. 校验并解压到 `data/plugins/<插件名>/`
-4. **你去 WebUI 插件管理点一下重载**，新插件生效
+4. **重启 AstrBot**，新插件才会被扫描到并出现在插件管理里
+   （不能点重载——还没加载的插件在列表里没有条目）
 
 安全设计：
 

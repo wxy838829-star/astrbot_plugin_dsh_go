@@ -726,7 +726,8 @@ class DshGoPlugin(star.Star):
             yield event.plain_result(
                 f"装好了：{name}\n"
                 f"位置：{plugins_dir}/{name}\n\n"
-                "还差最后一步——去 AstrBot WebUI 的「插件管理」点一下重载，新插件才会生效。"
+                "最后一步：**重启 AstrBot**（不是点重载——新插件还没被扫描到，"
+                "列表里没有它，也就没有可点的重载按钮）。重启后它就会出现在插件管理里。"
             )
         finally:
             self._busy.discard(key)
