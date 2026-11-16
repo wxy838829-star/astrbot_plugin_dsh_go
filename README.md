@@ -63,10 +63,14 @@ AstrBot 和 dsh-go 装在**同一台机器**、同一个 Linux 环境里，插�
 AstrBot 装在**另一个环境**（典型例子：安卓「泡泡版」App，它自带一套独立 Linux，
 里面没有 dsh）。这时在 dsh-go 那一侧跑一个桥接服务，两边通过本机回环通信。
 
-**第一步：在 dsh-go 这边启动桥接服务**
+**第一步：在 dsh-go 这边装好并启动桥接服务**
+
+桥接服务在另一个仓库：[dsh-go-astrbot-bridge](https://github.com/wxy838829-star/dsh-go-astrbot-bridge)
 
 ```sh
-sh /root/dsh-go-bridge/启动.sh
+git clone https://github.com/wxy838829-star/dsh-go-astrbot-bridge.git /root/dsh-go-bridge
+cd /root/dsh-go-bridge
+sh 启动.sh
 ```
 
 它会打印地址和口令，例如：
@@ -90,13 +94,20 @@ sh /root/dsh-go-bridge/启动.sh
 > 其余配置项（dsh_bin、patch_files、permission_mode 等）在桥接模式下**不生效**，
 > 它们由桥接服务那边的 `dsh_bridge.py` 负责。
 
-**桥接服务会自动启动**
+**可选：让桥接服务随 DSH 启动**
 
-已经配好了自启，不用手动管：
+桥接是个后台进程。想让它在 DSH 引擎启动时自动拉起，把桥接仓库里的
+`autostart.mjs` 挂到 profile 即可（详见
+[dsh-go-astrbot-bridge](https://github.com/wxy838829-star/dsh-go-astrbot-bridge) 的 README）：
 
-- 每次 DSH 引擎启动（= 打开 DSH App），会自动把桥接服务拉起来
-- 万一没起来，打开 DSH 的终端敲个回车也会自动拉起
-- 手动兜底：`sh /root/dsh-go-bridge/启动.sh`
+```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
+- insert:
+    - id: dsh-go-bridge-autostart
+      name: /root/dsh-go-bridge/autostart.mjs
+```
+
+没配自启的话，手机重启后手动跑一次 `sh /root/dsh-go-bridge/启动.sh` 就行。
 
 ## 使用
 
