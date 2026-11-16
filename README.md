@@ -144,13 +144,19 @@ sandbox mode "workspace-write" is requested but no sandbox backend is usable on 
 
 所以默认 `permission_mode = danger-full-access`，同时靠 `admin_only` + 白名单限制谁能用。
 
-## 安全提醒
+## ⚠️ 安全提醒
 
-开了这个插件，就等于能在聊天里让手机执行命令。建议保持：
+**开了这个插件，就等于在聊天里开放了「能执行命令」的能力。**
 
-- `admin_only: true`（只自己能用）
-- 不要把这个指令开放到公共群
-- 想更严就把 `allowed_users` 填成自己的 QQ 号
+默认配置（`permission_mode=danger-full-access` + `auto_approve=true`）意味着
+被授权的人可以通过聊天让手机执行任意命令。请务必保持：
+
+- **`admin_only: true`（默认就是开的，不要关）** —— 只允许 AstrBot 管理员使用
+- **不要把这个指令开放到公共群**，尤其是有其他管理员的大群
+- 想收得更紧，就把 `allowed_users` 填成你自己的账号 ID，这样连其他管理员也用不了
+- 桥接模式下不要把服务监听地址改成 `0.0.0.0`，默认只监听 `127.0.0.1`
+
+白名单优先级：`allowed_users` > `allowed_groups` > `admin_only`。
 
 ## 排障
 

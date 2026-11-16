@@ -7,7 +7,40 @@
 
 from __future__ import annotations
 
-import logging
+# 日志：AstrBot 环境里按规范使用 astrbot.api 的 logger；
+# 桥接服务独立运行（没有 astrbot 包）时退化为一个极简 stdout logger。
+# 刻意不引用标准库 logging，避免绕过 AstrBot 的日志体系。
+try:
+    from astrbot.api import logger  # type: ignore[no-redef]
+except ImportError:  # pragma: no cover - 仅独立运行时走到
+
+    class _PlainLogger:
+        """没有 AstrBot 时的最小 logger，只负责把消息打到 stdout。"""
+
+        @staticmethod
+        def _emit(level: str, args: tuple) -> None:
+            try:
+                print(f"[dsh-go] {level}:", *args)
+            except Exception:
+                pass
+
+        def debug(self, *args, **kwargs) -> None:  # noqa: D102
+            pass
+
+        def info(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("INFO", args)
+
+        def warning(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("WARN", args)
+
+        def error(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("ERROR", args)
+
+        def exception(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("ERROR", args)
+
+    logger = _PlainLogger()
+
 from dataclasses import dataclass
 
 try:  # aiohttp 是 AstrBot 自带依赖，正常情况都在
@@ -15,7 +48,6 @@ try:  # aiohttp 是 AstrBot 自带依赖，正常情况都在
 except Exception:  # pragma: no cover
     aiohttp = None  # type: ignore[assignment]
 
-logger = logging.getLogger("astrbot")
 
 
 class BridgeError(Exception):
@@ -54,7 +86,7 @@ class BridgeClient:
         url: str,
         token: str = "",
         timeout: float = 420.0,
-        log: logging.Logger | None = None,
+        log=None,
     ) -> None:
         self.url = url.rstrip("/")
         self.token = token
