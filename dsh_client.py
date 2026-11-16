@@ -4,7 +4,7 @@
 也就是手机上 dsh-go 的本机引擎。
 
 在 AstrBot 里运行时用 `astrbot.api` 的 logger；被桥接服务独立调用时
-（那个环境没有 astrbot 包）自动退化为 stdout 输出。
+（那个环境没有 astrbot 包）自动退化为 stderr 输出。
 
 设计要点：
 - 常驻一个子进程，避免每条消息冷启动 8~12 秒（实测常驻后 1~3 秒）。
