@@ -3,22 +3,21 @@ display_name: dsh-go 桥接
 short_desc: 在聊天里遥控手机上的 dsh-go
 desc: |
   把聊天指令转给手机上的 dsh-go 执行，再把结果发回聊天。
-
   聊天机器人本身做不到的事——读写文件、执行命令、查网页、看代码仓库——也能直接在聊天里完成。
 
-  **两种连接方式**
-  - 本机模式：AstrBot 与 dsh-go 在同一 Linux 环境，插件直接调用 dsh
-  - 桥接模式：AstrBot 在另一个容器（如安卓「泡泡版」App），通过本机回环连到 dsh-go 一侧的桥接服务
+  两种连接方式：
+  · 本机模式：AstrBot 与 dsh-go 在同一 Linux 环境，插件直接调用 dsh
+  · 桥接模式：AstrBot 在另一个容器（如安卓「泡泡版」），通过本机回环连到 dsh-go 一侧的桥接服务
 
-  **特点**
-  - 引擎常驻，每条指令 1~4 秒返回
-  - 同一段聊天保持上下文，进程重启自动 session/resume 接上
-  - 支持 /dsh 指令，也支持聊天模型自动调用 dsh_go 工具
-  - 空闲自动关引擎省资源，权限与白名单可配置
+  特点：
+  · 引擎常驻，每条指令 1~4 秒返回
+  · 同一段聊天保持上下文，进程重启自动接上
+  · 支持 /dsh 指令，也支持聊天模型自动调用 dsh_go 工具
+  · 空闲自动关引擎省资源，权限与白名单可配置
 
-  > ⚠️ 需要配合 dsh-go 使用。权限模式默认 danger-full-access（手机 proot 无沙箱后端），
-  > 且默认仅管理员可用（admin_only=true）。请勿把该指令开放到公共群。
-version: 1.0.2
+  注意：需要配合 dsh-go 使用。权限模式默认 danger-full-access（手机 proot 无沙箱后端），
+  且默认仅管理员可用（admin_only=true），请勿把该指令开放到公共群。
+version: 1.0.3
 author: wxy838829-star
 repo: https://github.com/wxy838829-star/astrbot_plugin_dsh_go
 astrbot_version: ">=4.17.0"
