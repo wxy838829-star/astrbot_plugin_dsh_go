@@ -1,5 +1,7 @@
 # astrbot_plugin_dsh_go
 
+> 在 AstrBot 4.29.4 上实测通过。
+
 在 QQ（或任何 AstrBot 平台）里遥控手机上的 **dsh-go**。
 
 你发一句话 → 插件交给手机上的 dsh-go → dsh-go 用它的工具（读写文件、跑命令、查网页、看仓库）干活 → 结果回到聊天。

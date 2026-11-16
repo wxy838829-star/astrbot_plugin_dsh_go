@@ -20,7 +20,7 @@ desc: |
 version: 1.0.0
 author: wxy838829-star
 repo: https://github.com/wxy838829-star/astrbot_plugin_dsh_go
-astrbot_version: ">=4.13.0"
+astrbot_version: ">=4.17.0"
 support_platforms:
   - aiocqhttp
   - qq_official
