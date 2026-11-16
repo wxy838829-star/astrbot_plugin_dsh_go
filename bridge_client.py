@@ -172,6 +172,35 @@ class BridgeClient:
         data = await self._post("/stop", {"session": session_key})
         return bool(data.get("stopped"))
 
+    async def download(self, path: str) -> tuple[bytes, str]:
+        """从桥接服务那一侧下载一个文件，返回 (内容, 文件名)。
+
+        用于「让 dsh-go 写好插件后自动装到 AstrBot」这类跨容器的文件搬运。
+        桥接服务只允许下载它白名单目录里的文件。
+        """
+        session = await self._get_session()
+        try:
+            async with session.get(
+                f"{self.url}/download",
+                params={"path": path},
+                timeout=aiohttp.ClientTimeout(total=self.timeout + 60),
+            ) as resp:
+                if resp.status == 401:
+                    raise BridgeError("桥接服务拒绝了 token")
+                if resp.status == 404:
+                    raise BridgeError(f"桥接服务那边找不到文件：{path}")
+                if resp.status == 403:
+                    raise BridgeError(f"桥接服务不允许下载这个路径：{path}")
+                if resp.status >= 400:
+                    raise BridgeError(f"桥接服务返回 {resp.status}：{path}")
+                data = await resp.read()
+                name = path.rstrip("/").split("/")[-1] or "download.bin"
+                return data, name
+        except BridgeError:
+            raise
+        except Exception as e:
+            raise BridgeError(f"从桥接服务下载失败：{e}") from e
+
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()

@@ -25,6 +25,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
 
+from . import plugin_installer
 from .bridge_client import BridgeClient, BridgeError
 from .dsh_client import (
     DshAcpClient,
@@ -58,6 +59,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "keep_context": True,
     "bridge_url": "",
     "bridge_token": "",
+    "enable_install": False,
+    "install_max_mb": 16,
 }
 
 HELP_TEXT = """dsh-go 桥接
@@ -66,6 +69,7 @@ HELP_TEXT = """dsh-go 桥接
 /dsh 状态     看引擎连没连上
 /dsh 新对话   换一个干净的 dsh 上下文
 /dsh 停止     打断正在跑的任务
+/dsh 装插件 <需求>  让 dsh-go 写个 AstrBot 插件并自动装上
 /dsh 帮助     这条说明
 
 也能不说指令，让聊天模型自己调用 dsh_go 工具转过去。"""
@@ -74,6 +78,11 @@ _STATUS_FACTS = ("状态", "status")
 _NEW_FACTS = ("新对话", "新会话", "新话题", "new", "reset")
 _STOP_FACTS = ("停止", "stop", "取消", "cancel", "中断")
 _HELP_FACTS = ("帮助", "help", "?", "？")
+_INSTALL_FACTS = ("装插件", "安装插件", "install")
+
+# 让 dsh-go 写插件的固定工作目录与产物路径（两边约定好的）
+_INSTALL_DIR = "/root/workspace/_plugins"
+_INSTALL_ZIP = _INSTALL_DIR + "/out.zip"
 
 
 class DshGoPlugin(star.Star):
@@ -606,6 +615,13 @@ class DshGoPlugin(star.Star):
             event.stop_event()
             return
 
+        install_req = _match_install(arg)
+        if install_req is not None:
+            async for item in self._handle_install(event, key, install_req):
+                yield item
+            event.stop_event()
+            return
+
         if key in self._busy:
             yield event.plain_result("上一条还在跑，等它结束，或者发 /dsh 停止。")
             event.stop_event()
@@ -633,6 +649,96 @@ class DshGoPlugin(star.Star):
         finally:
             self._busy.discard(key)
         event.stop_event()
+
+    # ------------------------------------------------------------------ 装插件
+
+    async def _handle_install(self, event: AstrMessageEvent, key: str, requirement: str):
+        """让 dsh-go 写一个插件，取回 zip 并装进 AstrBot。"""
+        if not self._conf("enable_install", False):
+            yield event.plain_result(
+                "自动装插件没开。如果确实需要，在插件配置里把 enable_install 打开\n"
+                "（它会把 dsh-go 写好的插件直接装进 AstrBot，风险自负）"
+            )
+            return
+        requirement = (requirement or "").strip()
+        if not requirement:
+            yield event.plain_result(
+                "要写什么样的插件？例如：\n/dsh 装插件 一个 /echo 指令，把用户说的内容重复一遍"
+            )
+            return
+        if key in self._busy:
+            yield event.plain_result("上一条还在跑，等它结束再来。")
+            return
+
+        self._busy.add(key)
+        try:
+            yield event.plain_result("好，让 dsh-go 写插件去了，写完会自动装上…")
+            prompt = _INSTALL_PROMPT.format(
+                requirement=requirement,
+                dir=_INSTALL_DIR,
+                zip=_INSTALL_ZIP,
+                author=str(self._conf("install_author", "dsh-go") or "dsh-go"),
+            )
+            try:
+                result = await self._run_task(event, prompt, key)
+            except DshNotRunningError as e:
+                yield event.plain_result(f"连不上手机上的 dsh-go：{e}")
+                return
+            except DshError as e:
+                yield event.plain_result(f"dsh-go 处理失败：{e}")
+                return
+            if result.error and not result.text:
+                yield event.plain_result(f"dsh-go 出错了：{result.error}")
+                return
+
+            # 取回 zip：桥接模式走 HTTP，本机模式直接读磁盘
+            try:
+                data = await self._fetch_install_zip()
+            except (BridgeError, DshError, OSError) as e:
+                yield event.plain_result(f"没拿到插件包：{e}")
+                return
+
+            limit = int(float(self._conf("install_max_mb", 16) or 16) * 1024 * 1024)
+            if len(data) > limit:
+                yield event.plain_result(
+                    f"插件包太大了（{len(data) / 1024 / 1024:.1f} MB，上限 {limit / 1024 / 1024:.0f} MB），没有安装。"
+                )
+                return
+            if not plugin_installer.is_zip(plugin_installer.coerce_zip(data)):
+                yield event.plain_result("dsh-go 给的产物不是 zip，没有安装。")
+                return
+
+            plugins_dir = plugin_installer.default_plugins_dir()
+            if not plugins_dir:
+                yield event.plain_result("拿不到 AstrBot 的插件目录，没法安装。")
+                return
+            overwrite = "覆盖" in requirement or "替换" in requirement
+            try:
+                name = plugin_installer.install_plugin_zip(
+                    plugin_installer.coerce_zip(data),
+                    plugins_dir,
+                    overwrite=overwrite,
+                )
+            except plugin_installer.InstallError as e:
+                yield event.plain_result(f"安装失败：{e}")
+                return
+
+            yield event.plain_result(
+                f"装好了：{name}\n"
+                f"位置：{plugins_dir}/{name}\n\n"
+                "还差最后一步——去 AstrBot WebUI 的「插件管理」点一下重载，新插件才会生效。"
+            )
+        finally:
+            self._busy.discard(key)
+
+    async def _fetch_install_zip(self) -> bytes:
+        """把 dsh-go 侧生成的 zip 取回来。"""
+        if self._use_bridge:
+            data, _ = await self._get_bridge().download(_INSTALL_ZIP)
+            return data
+        # 本机模式：同一个文件系统，直接读
+        with open(_INSTALL_ZIP, "rb") as f:
+            return f.read()
 
     async def _status_text(self) -> str:
         lines = ["dsh-go 状态", ""]
@@ -729,6 +835,39 @@ class DshGoPlugin(star.Star):
         if not other_module and other_name and my_name and other_name != my_name:
             return
         await self._shutdown()
+
+
+def _match_install(arg: str) -> str | None:
+    """判断这条指令是不是「装插件」，返回需求正文；不是则返回 None。"""
+    text = (arg or "").strip()
+    low = text.lower()
+    for word in _INSTALL_FACTS:
+        if low.startswith(word):
+            return text[len(word) :].lstrip(" ：:，,")
+    return None
+
+
+_INSTALL_PROMPT = """你现在的任务是：写一个 AstrBot 插件，并打包成 zip。
+
+用户想要的功能：
+{requirement}
+
+硬性要求（不满足就算失败）：
+1. 插件目录固定放在 {dir}/<插件目录名>/，目录名用 astrbot_plugin_ 开头的小写英文
+2. 目录里必须有 metadata.yaml，至少包含这些字段：
+   name（必须和目录名一致）、display_name、short_desc、desc、version（1.0.0）、
+   author、repo、astrbot_version
+3. 代码要能在 AstrBot 4.x 加载：
+   - 插件类继承 astrbot.api.star.Star；**不要**用已废弃的 @register 装饰器（新版会自动识别 Star 子类）
+   - 用 from astrbot.api.event import filter, AstrMessageEvent 注册指令
+   - 日志用 self.logger（Star 自带）或 from astrbot.api import logger，禁止用 logging.getLogger
+   - 顺手写一个简短的 README.md
+   - 不要执行危险操作，不要联网拉未知内容
+4. 写完后把插件目录打包成 {zip}：
+   zip 根目录直接是插件文件（metadata.yaml 在最外层），不要再套一层目录
+5. 打包完成后，只回复一行：DONE <插件目录名>
+
+注意：{zip} 这个文件必须真实存在，AstrBot 会来取。"""
 
 
 def _split_ids(raw: Any) -> set[str]:

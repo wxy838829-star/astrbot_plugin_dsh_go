@@ -118,6 +118,7 @@ sh 启动.sh
 | `/dsh 状态` | 引擎连没连上、工作目录、权限模式 |
 | `/dsh 新对话` | 换一段干净的上下文 |
 | `/dsh 停止` | 打断正在跑的任务 |
+| `/dsh 装插件 <需求>` | 让 dsh-go 现场写一个 AstrBot 插件并自动装上（需开启 `enable_install`） |
 | `/dsh 帮助` | 命令说明 |
 
 不带指令也可以：聊天模型会自己判断要不要调用 `dsh_go` 工具（可在配置里关掉）。
@@ -139,6 +140,9 @@ sh 启动.sh
 | `session_scope` | `chat` | `chat` 一个群共享上下文，`user` 每人一段 |
 | `show_progress` | 开 | 执行中播报「正在用 xxx」 |
 | `max_reply_chars` | 3500 | 回聊天的最长字数 |
+| `enable_install` | 关 | 允许 `/dsh 装插件`（会让 dsh-go 写代码并装进 AstrBot，风险自负） |
+| `install_max_mb` | 16 | 自动装插件时插件包大小上限 |
+| `install_author` | `dsh-go` | 自动生成插件里填的作者名 |
 | `bridge_url` | 空 | 桥接模式地址；填了就走桥接，留空走本机 |
 | `bridge_token` | 空 | 桥接服务口令 |
 | `timeout_seconds` | 420 | 单任务超时 |
@@ -181,3 +185,28 @@ sandbox mode "workspace-write" is requested but no sandbox backend is usable on 
 | 任务超时 | 调大 `timeout_seconds`；或 `/dsh 停止` 后重发 |
 
 日志关键词：`[dsh-go]`。
+
+## 进阶：让它自己写插件并装上
+
+开启 `enable_install` 后：
+
+```
+/dsh 装插件 一个 /hello 指令，随机夸我一句
+```
+
+流程是：
+
+1. dsh-go 按需求写插件，放到它那边的 `/root/workspace/_plugins/`，打包成 `out.zip`
+2. 插件把 zip 取回来（桥接模式走 HTTP，本机模式直接读磁盘）
+3. 校验并解压到 `data/plugins/<插件名>/`
+4. **你去 WebUI 插件管理点一下重载**，新插件生效
+
+安全设计：
+
+- 默认**关闭**，要手动打开
+- 压缩包拒绝绝对路径和 `..`（防 zip slip）
+- 必须有 `metadata.yaml`，插件名只允许字母数字 `_.-`
+- 同名目录已存在时不覆盖，除非指令里带「覆盖」
+
+> 它装的是 dsh-go 现写的代码。你等于在给一个 AI 往自己 AstrBot 里塞插件的权限，
+> 请自己判断需求描述是否安全。

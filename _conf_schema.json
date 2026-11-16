@@ -56,6 +56,21 @@
     "type": "bool",
     "default": true
   },
+  "enable_install": {
+    "description": "允许 /dsh 装插件：让 dsh-go 写一个插件并自动装进 AstrBot。风险较高，默认关闭",
+    "type": "bool",
+    "default": false
+  },
+  "install_max_mb": {
+    "description": "自动装插件时允许的插件包大小上限（MB）",
+    "type": "int",
+    "default": 16
+  },
+  "install_author": {
+    "description": "自动生成的插件在 metadata.yaml 里填的作者名",
+    "type": "string",
+    "default": "dsh-go"
+  },
   "admin_only": {
     "description": "只允许 AstrBot 管理员使用（关掉则所有人可用，有风险）",
     "type": "bool",
