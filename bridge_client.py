@@ -115,10 +115,11 @@ class BridgeClient:
     async def _post(self, path: str, payload: dict) -> dict:
         session = await self._get_session()
         try:
+            total = None if self.timeout <= 0 else self.timeout + 30
             async with session.post(
                 f"{self.url}{path}",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=self.timeout + 30),
+                timeout=aiohttp.ClientTimeout(total=total),
             ) as resp:
                 body = await resp.json(content_type=None)
                 if resp.status == 401:
@@ -152,10 +153,13 @@ class BridgeClient:
                 "打开 DSH 的终端敲个回车即可自动拉起"
             ) from e
 
-    async def ask(self, text: str, session_key: str) -> BridgeResult:
-        data = await self._post(
-            "/ask", {"text": text, "session": session_key}
-        )
+    async def ask(
+        self, text: str, session_key: str, timeout: float | None = None
+    ) -> BridgeResult:
+        payload: dict = {"text": text, "session": session_key}
+        if timeout is not None:
+            payload["timeout"] = timeout
+        data = await self._post("/ask", payload)
         return BridgeResult(
             ok=bool(data.get("ok")),
             text=str(data.get("text") or ""),
@@ -180,10 +184,11 @@ class BridgeClient:
         """
         session = await self._get_session()
         try:
+            total = None if self.timeout <= 0 else self.timeout + 60
             async with session.get(
                 f"{self.url}/download",
                 params={"path": path},
-                timeout=aiohttp.ClientTimeout(total=self.timeout + 60),
+                timeout=aiohttp.ClientTimeout(total=total),
             ) as resp:
                 if resp.status == 401:
                     raise BridgeError("桥接服务拒绝了 token")

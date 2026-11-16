@@ -102,7 +102,7 @@
     "default": 3500
   },
   "timeout_seconds": {
-    "description": "单个任务最长等多久（秒）",
+    "description": "单个任务最长等多久（秒）。设为 0 表示不限时（写大项目用，注意任务会一直占着）。后台任务同样适用",
     "type": "int",
     "default": 420
   },

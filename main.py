@@ -69,6 +69,8 @@ HELP_TEXT = """dsh-go 桥接
 /dsh 状态     看引擎连没连上
 /dsh 新对话   换一个干净的 dsh 上下文
 /dsh 停止     打断正在跑的任务
+/dsh 后台 <任务>  后台跑（适合大项目），跑完自动把结果发过来
+/dsh 任务    看还在跑的后台任务
 /dsh 装插件 <需求>  让 dsh-go 写个 AstrBot 插件并自动装上
 /dsh 帮助     这条说明
 
@@ -79,6 +81,8 @@ _NEW_FACTS = ("新对话", "新会话", "新话题", "new", "reset")
 _STOP_FACTS = ("停止", "stop", "取消", "cancel", "中断")
 _HELP_FACTS = ("帮助", "help", "?", "？")
 _INSTALL_FACTS = ("装插件", "安装插件", "install")
+_BG_FACTS = ("后台", "bg", "background")
+_TASKS_FACTS = ("任务", "tasks", "后台任务")
 
 # 让 dsh-go 写插件的固定工作目录与产物路径（两边约定好的）
 _INSTALL_DIR = "/root/workspace/_plugins"
@@ -103,6 +107,7 @@ class DshGoPlugin(star.Star):
         self._sessions: dict[str, str] = {}
         self._busy: set[str] = set()   # 哪个聊天正在跑（用于去重提示）
         self._inflight = 0             # 真正在跑的任务数（用于空闲回收判断）
+        self._bg: dict[str, asyncio.Task] = {}  # 后台任务：聊天键 -> task
         self._idle_task: asyncio.Task | None = None
         self._starting: asyncio.Task | None = None
         self._closed = False
@@ -211,7 +216,8 @@ class DshGoPlugin(star.Star):
             self._bridge = BridgeClient(
                 url,
                 token=str(self._conf("bridge_token", "") or ""),
-                timeout=float(self._conf("timeout_seconds", 420)),
+                # 0 表示不限时（BridgeClient 内部会转成 None）
+                timeout=float(self._conf("timeout_seconds", 420) or 0),
                 log=self.logger,
             )
         return self._bridge
@@ -266,11 +272,13 @@ class DshGoPlugin(star.Star):
             patch_files=self._patch_list(),
             extra_args=self._extra_args(),
         )
+        cfg_timeout = float(self._conf("timeout_seconds", 420) or 0)
         client = DshAcpClient(
             cmd,
             cwd=self._work_dir(),
             env=self._build_env(),
-            request_timeout=float(self._conf("timeout_seconds", 420)),
+            # 单个任务可以设成不限时，但握手/建会话这类内部请求仍要有个上限
+            request_timeout=420.0 if cfg_timeout <= 0 else cfg_timeout,
             auto_approve=bool(self._conf("auto_approve", True)),
             log=self.logger,
         )
@@ -381,6 +389,11 @@ class DshGoPlugin(star.Star):
 
     async def _shutdown(self) -> None:
         self._closed = True
+        for key in list(self._bg):
+            try:
+                await self._cancel_background(key)
+            except Exception:
+                pass
         await self._cancel_idle_task()
         bridge, self._bridge = self._bridge, None
         if bridge is not None:
@@ -439,7 +452,7 @@ class DshGoPlugin(star.Star):
             result = await client.prompt(
                 sid,
                 text,
-                timeout=float(self._conf("timeout_seconds", 420)),
+                timeout=float(self._conf("timeout_seconds", 420) or 0),
                 on_tool=on_tool,
             )
         finally:
@@ -462,9 +475,10 @@ class DshGoPlugin(star.Star):
         """桥接模式：任务交给 dsh-go 那一侧的 dsh_bridge.py 执行。"""
         bridge = self._get_bridge()
         started = time.time()
+        timeout = float(self._conf("timeout_seconds", 420) or 0)
         self._inflight += 1
         try:
-            data = await bridge.ask(text, key)
+            data = await bridge.ask(text, key, timeout=timeout)
         except BridgeError as e:
             raise DshError(str(e)) from e
         finally:
@@ -594,6 +608,10 @@ class DshGoPlugin(star.Star):
             return
 
         if fact in _STOP_FACTS:
+            if await self._cancel_background(key):
+                yield event.plain_result("后台任务已停。")
+                event.stop_event()
+                return
             if self._use_bridge:
                 try:
                     stopped = await self._get_bridge().stop(key)
@@ -612,6 +630,18 @@ class DshGoPlugin(star.Star):
                 yield event.plain_result("已经让它停下了。")
             else:
                 yield event.plain_result("现在没有在跑的任务。")
+            event.stop_event()
+            return
+
+        bg_req = _match_prefix(arg, _BG_FACTS)
+        if bg_req is not None:
+            async for item in self._handle_background(event, key, bg_req):
+                yield item
+            event.stop_event()
+            return
+
+        if fact in _TASKS_FACTS:
+            yield event.plain_result(self._tasks_text(key))
             event.stop_event()
             return
 
@@ -649,6 +679,80 @@ class DshGoPlugin(star.Star):
         finally:
             self._busy.discard(key)
         event.stop_event()
+
+    # ------------------------------------------------------------------ 后台任务
+
+    async def _handle_background(self, event: AstrMessageEvent, key: str, task: str):
+        task = (task or "").strip()
+        if not task:
+            yield event.plain_result(
+                "要后台跑什么？例如：\n"
+                "/dsh 后台 把 /root/workspace/我的项目 的测试跑一遍，失败的修到全过"
+            )
+            return
+        if key in self._busy or key in self._bg:
+            yield event.plain_result("这个聊天已经有任务在跑了，先 /dsh 停止 或等它结束。")
+            return
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        timeout = float(self._conf("timeout_seconds", 420) or 0)
+        note = "不限时" if timeout <= 0 else f"最长 {timeout / 60:.0f} 分钟"
+        yield event.plain_result(
+            f"好，后台跑起来了（{note}）。\n"
+            "跑完我会直接把结果发到这个聊天，期间你可以正常聊天。\n"
+            "中途想停就发 /dsh 停止。"
+        )
+
+        self._busy.add(key)
+        self._bg[key] = asyncio.create_task(
+            self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
+        )
+
+    async def _run_background(self, key: str, task: str, umo: str) -> None:
+        """后台跑一个任务，结束后主动把结果发到聊天。"""
+        try:
+            result = await self._run_task(None, task, key, progress=False)
+            text = self._format(result)
+        except DshNotRunningError as e:
+            text = f"后台任务连不上 dsh-go：{e}"
+        except DshError as e:
+            text = f"后台任务失败：{e}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover
+            self.logger.exception("[dsh-go] 后台任务异常")
+            text = f"后台任务异常：{e}"
+        finally:
+            self._busy.discard(key)
+            self._bg.pop(key, None)
+
+        if umo:
+            try:
+                await self.context.send_message(umo, MessageChain([Plain(text)]))
+            except Exception:
+                self.logger.warning("[dsh-go] 后台结果发送失败", exc_info=True)
+
+    def _tasks_text(self, key: str) -> str:
+        running = "在跑" if key in self._bg else "没有"
+        lines = [f"后台任务：{running}"]
+        if len(self._bg) > 1:
+            lines.append(f"（其它聊天还有 {len(self._bg) - 1} 个在跑）")
+        timeout = float(self._conf("timeout_seconds", 420) or 0)
+        lines.append(
+            "单任务超时：" + ("不限时" if timeout <= 0 else f"{timeout / 60:.0f} 分钟")
+        )
+        return "\n".join(lines)
+
+    async def _cancel_background(self, key: str) -> bool:
+        task = self._bg.get(key)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        try:
+            await asyncio.gather(task, return_exceptions=True)
+        except Exception:
+            pass
+        return True
 
     # ------------------------------------------------------------------ 装插件
 
@@ -838,14 +942,19 @@ class DshGoPlugin(star.Star):
         await self._shutdown()
 
 
-def _match_install(arg: str) -> str | None:
-    """判断这条指令是不是「装插件」，返回需求正文；不是则返回 None。"""
+def _match_prefix(arg: str, words: tuple[str, ...]) -> str | None:
+    """指令是否以这些词之一开头；是则返回后面的正文。"""
     text = (arg or "").strip()
     low = text.lower()
-    for word in _INSTALL_FACTS:
+    for word in words:
         if low.startswith(word):
             return text[len(word) :].lstrip(" ：:，,")
     return None
+
+
+def _match_install(arg: str) -> str | None:
+    """判断这条指令是不是「装插件」，返回需求正文；不是则返回 None。"""
+    return _match_prefix(arg, _INSTALL_FACTS)
 
 
 _INSTALL_PROMPT = """你现在的任务是：写一个 AstrBot 插件，并打包成 zip。
