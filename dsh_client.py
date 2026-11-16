@@ -19,21 +19,22 @@ import json
 import os
 import shutil
 import signal
+import sys
 import time
 # 日志：AstrBot 环境里按规范使用 astrbot.api 的 logger；
-# 桥接服务独立运行（没有 astrbot 包）时退化为一个极简 stdout logger。
+# 桥接服务独立运行（没有 astrbot 包）时退化为一个极简的 stderr logger。
 # 刻意不引用标准库 logging，避免绕过 AstrBot 的日志体系。
 try:
     from astrbot.api import logger  # type: ignore[no-redef]
 except ImportError:  # pragma: no cover - 仅独立运行时走到
 
     class _PlainLogger:
-        """没有 AstrBot 时的最小 logger，只负责把消息打到 stdout。"""
+        """没有 AstrBot 时的最小 logger，只负责把消息写到 stderr。"""
 
         @staticmethod
         def _emit(level: str, args: tuple) -> None:
             try:
-                print(f"[dsh-go] {level}:", *args)
+                sys.stderr.write("[dsh-go] " + level + ": " + " ".join(str(a) for a in args) + "\n")
             except Exception:
                 pass
 
