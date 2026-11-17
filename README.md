@@ -349,3 +349,27 @@ QQ 不渲染 Markdown，所以插件会先整理再发：
 
 以前「哪个聊天在跑」存在两处（`_busy` 集合 + `_bg` 字典），改代码时容易漏判。
 现在统一成一张登记表，`/dsh 任务` 和空闲回收都读同一份。
+
+## 开发与测试
+
+```sh
+pip install pytest
+python -m pytest tests -q
+```
+
+测试**不需要 AstrBot 本体，也不需要真实的 dsh 引擎**，几十秒跑完：
+
+| 文件 | 覆盖 |
+| --- | --- |
+| `test_formatting.py` | Markdown 转换、代码块保护、切片边界 |
+| `test_safety.py` | 11 类危险指令拦截 + 5 类正常指令放行 |
+| `test_errors.py` | 异常到人话的映射 |
+| `test_store.py` | 会话持久化、上限淘汰、pending 标记 |
+| `test_audit.py` | 追加、截断、轮转、坏行容错 |
+| `test_installer.py` | zip slip、缺 metadata、非法插件名、覆盖策略 |
+| `test_bridge_client.py` | 失败退避、成功清零 |
+
+推代码会自动跑（`.github/workflows/test.yml`）。
+
+命令级的端到端测试（`/dsh` 全流程、桥接真实请求）需要 AstrBot 环境和可用的 dsh，
+放在本地手动跑，不进 CI。

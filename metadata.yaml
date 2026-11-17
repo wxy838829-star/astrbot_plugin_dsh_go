@@ -17,7 +17,7 @@ desc: |
 
   注意：需要配合 dsh-go 使用。权限模式默认 danger-full-access（手机 proot 无沙箱后端），
   且默认仅管理员可用（admin_only=true），请勿把该指令开放到公共群。
-version: 1.1.1
+version: 1.1.2
 author: wxy838829-star
 repo: https://github.com/wxy838829-star/astrbot_plugin_dsh_go
 astrbot_version: ">=4.17.0"

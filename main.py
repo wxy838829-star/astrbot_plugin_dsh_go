@@ -26,6 +26,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
 
+from . import errors as errmsg
 from . import formatting, plugin_installer, safety
 from .audit import AuditLog, default_audit_dir
 from .store import StateStore
@@ -490,6 +491,11 @@ class DshGoPlugin(star.Star):
 
     # ------------------------------------------------------------------ 跑一个任务
 
+    @staticmethod
+    def _err_text(exc: Exception) -> str:
+        """把异常翻译成人话（带原始信息尾巴）。"""
+        return errmsg.friendly_with_detail(str(exc))
+
     def _guard(self, task: str) -> str | None:
         """危险操作拦截。返回提示文案表示已拦下，返回 None 表示放行。"""
         if not self._conf("danger_guard", True):
@@ -857,16 +863,16 @@ class DshGoPlugin(star.Star):
             try:
                 result = await self._run_task(event, task_text, key)
             except DshNotRunningError as e:
-                yield event.plain_result(f"连不上手机上的 dsh-go：{e}")
+                yield event.plain_result(f"连不上手机上的 dsh-go：{self._err_text(e)}")
                 event.stop_event()
                 return
             except DshError as e:
-                yield event.plain_result(f"dsh-go 处理失败：{e}")
+                yield event.plain_result(f"dsh-go 处理失败：{self._err_text(e)}")
                 event.stop_event()
                 return
             except Exception as e:
                 self.logger.exception("[dsh-go] 执行任务异常")
-                yield event.plain_result(f"dsh-go 这边异常了：{e}")
+                yield event.plain_result(f"dsh-go 这边异常了：{self._err_text(e)}")
                 event.stop_event()
                 return
             self._audit_write(
@@ -934,10 +940,10 @@ class DshGoPlugin(star.Star):
             elapsed = round(float(result.elapsed or 0), 1)
             error = result.error or ""
         except DshNotRunningError as e:
-            text = [f"后台任务连不上 dsh-go：{e}"]
+            text = [f"后台任务连不上 dsh-go：{self._err_text(e)}"]
             error = str(e)
         except DshError as e:
-            text = [f"后台任务失败：{e}"]
+            text = [f"后台任务失败：{self._err_text(e)}"]
             error = str(e)
         except asyncio.CancelledError:
             self._audit_write(
@@ -947,7 +953,7 @@ class DshGoPlugin(star.Star):
             raise
         except Exception as e:  # pragma: no cover
             self.logger.exception("[dsh-go] 后台任务异常")
-            text = [f"后台任务异常：{e}"]
+            text = [f"后台任务异常：{self._err_text(e)}"]
             error = str(e)
         finally:
             self._end_task(key)
@@ -1059,10 +1065,10 @@ class DshGoPlugin(star.Star):
             try:
                 result = await self._run_task(event, prompt, key)
             except DshNotRunningError as e:
-                yield event.plain_result(f"连不上手机上的 dsh-go：{e}")
+                yield event.plain_result(f"连不上手机上的 dsh-go：{self._err_text(e)}")
                 return
             except DshError as e:
-                yield event.plain_result(f"dsh-go 处理失败：{e}")
+                yield event.plain_result(f"dsh-go 处理失败：{self._err_text(e)}")
                 return
             if result.error and not result.text:
                 yield event.plain_result(f"dsh-go 出错了：{result.error}")

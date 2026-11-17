@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 # 日志：AstrBot 环境里按规范使用 astrbot.api 的 logger；
 # 桥接服务独立运行（没有 astrbot 包）时退化为一个极简的 stderr logger。
@@ -44,6 +45,8 @@ except ImportError:  # pragma: no cover - 仅独立运行时走到
     logger = _PlainLogger()
 
 from dataclasses import dataclass
+
+from .errors import friendly
 
 try:  # aiohttp 是 AstrBot 自带依赖，正常情况都在
     import aiohttp
@@ -95,6 +98,9 @@ class BridgeClient:
         self.timeout = timeout
         self.log = log or logger
         self._session = None
+        # 连续失败后的退避：避免桥接挂掉时，每条指令都先等一次连接超时
+        self._fail_count = 0
+        self._blocked_until = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -115,6 +121,7 @@ class BridgeClient:
     async def _post(self, path: str, payload: dict) -> dict:
         session = await self._get_session()
         try:
+            self._check_backoff()
             total = None if self.timeout <= 0 else self.timeout + 30
             async with session.post(
                 f"{self.url}{path}",
@@ -128,30 +135,58 @@ class BridgeClient:
                     )
                 if resp.status == 429:
                     raise BridgeError(body.get("error") or "上一条任务还在跑")
+                self._note_success()
                 if resp.status >= 400 and not isinstance(body, dict):
                     raise BridgeError(f"桥接服务返回 {resp.status}")
                 return body if isinstance(body, dict) else {}
         except BridgeError:
             raise
         except Exception as e:
+            self._note_failure()
             raise BridgeError(
                 f"连不上桥接服务 {self.url}（{e}）。"
                 "如果手机刚重启过，打开 DSH 的终端敲个回车就能自动拉起，"
                 "或运行 sh /root/workspace/dsh-go-bridge/启动.sh"
             ) from e
 
+    def _check_backoff(self) -> None:
+        """退避窗口内直接拒绝，不再发请求。"""
+        if self._blocked_until > time.time():
+            wait = int(self._blocked_until - time.time()) + 1
+            raise BridgeError(
+                f"桥接服务刚才连不上，{wait} 秒后再试（连续失败 {self._fail_count} 次）"
+            )
+
+    def _note_success(self) -> None:
+        self._fail_count = 0
+        self._blocked_until = 0.0
+
+    def _note_failure(self) -> None:
+        """记一次连接失败，并设置退避窗口（5s → 10s → 20s … 最多 300s）。"""
+        self._fail_count += 1
+        backoff = min(300.0, 5.0 * (2 ** min(self._fail_count - 1, 6)))
+        self._blocked_until = time.time() + backoff
+        self.log.warning(
+            "[dsh-go] 桥接请求失败（第 %s 次），%.0f 秒内不再重试",
+            self._fail_count,
+            backoff,
+        )
+
     async def health(self) -> dict:
+        self._check_backoff()
         session = await self._get_session()
         try:
             async with session.get(
                 f"{self.url}/health", timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                return await resp.json(content_type=None)
+                data = await resp.json(content_type=None)
+                self._note_success()
+                return data
+        except BridgeError:
+            raise
         except Exception as e:
-            raise BridgeError(
-                f"连不上桥接服务 {self.url}（{e}）。"
-                "打开 DSH 的终端敲个回车即可自动拉起"
-            ) from e
+            self._note_failure()
+            raise BridgeError(friendly(str(e))) from e
 
     async def ask(
         self, text: str, session_key: str, timeout: float | None = None
@@ -182,6 +217,7 @@ class BridgeClient:
         用于「让 dsh-go 写好插件后自动装到 AstrBot」这类跨容器的文件搬运。
         桥接服务只允许下载它白名单目录里的文件。
         """
+        self._check_backoff()
         session = await self._get_session()
         try:
             total = None if self.timeout <= 0 else self.timeout + 60
@@ -199,14 +235,19 @@ class BridgeClient:
                 if resp.status >= 400:
                     raise BridgeError(f"桥接服务返回 {resp.status}：{path}")
                 data = await resp.read()
+                self._note_success()
                 name = path.rstrip("/").split("/")[-1] or "download.bin"
                 return data, name
         except BridgeError:
             raise
         except Exception as e:
-            raise BridgeError(f"从桥接服务下载失败：{e}") from e
+            self._note_failure()
+            raise BridgeError(friendly(str(e))) from e
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
+        # 连续失败后的退避：避免桥接挂掉时，每条指令都先等一次连接超时
+        self._fail_count = 0
+        self._blocked_until = 0.0
