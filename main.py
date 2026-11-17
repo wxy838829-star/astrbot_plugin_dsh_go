@@ -25,7 +25,9 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
 
-from . import plugin_installer
+from . import plugin_installer, safety
+from .audit import AuditLog, default_audit_dir
+from .store import StateStore
 from .bridge_client import BridgeClient, BridgeError
 from .dsh_client import (
     DshAcpClient,
@@ -71,6 +73,7 @@ HELP_TEXT = """dsh-go 桥接
 /dsh 停止     打断正在跑的任务
 /dsh 后台 <任务>  后台跑（适合大项目），跑完自动把结果发过来
 /dsh 任务    看还在跑的后台任务
+/dsh 历史    最近几次任务做了些什么
 /dsh 装插件 <需求>  让 dsh-go 写个 AstrBot 插件并自动装上
 /dsh 帮助     这条说明
 
@@ -90,6 +93,7 @@ _NL_PATTERN = (
 
 _BG_FACTS = ("后台", "bg", "background")
 _TASKS_FACTS = ("任务", "tasks", "后台任务")
+_HISTORY_FACTS = ("历史", "history", "记录")
 
 # 让 dsh-go 写插件的固定工作目录与产物路径（两边约定好的）
 _INSTALL_DIR = "/root/workspace/_plugins"
@@ -111,7 +115,11 @@ class DshGoPlugin(star.Star):
         self._bridge: BridgeClient | None = None
         self._client: DshAcpClient | None = None
         self._client_lock = asyncio.Lock()
-        self._sessions: dict[str, str] = {}
+        data_dir = default_audit_dir()
+        self._store = StateStore(data_dir, max_sessions=int(self._conf("max_sessions", 50) or 50))
+        self._audit = AuditLog(str(self._store.base_dir / "audit.jsonl")) if data_dir else None
+        self._sessions: dict[str, str] = self._store.load_sessions()
+        self._pending_note = self._store.take_pending() if self._store else None
         self._busy: set[str] = set()   # 哪个聊天正在跑（用于去重提示）
         self._inflight = 0             # 真正在跑的任务数（用于空闲回收判断）
         self._bg: dict[str, asyncio.Task] = {}  # 后台任务：聊天键 -> task
@@ -316,15 +324,33 @@ class DshGoPlugin(star.Star):
         await client.stop()
         raise DshError("插件已卸载，启动被取消")
 
+    def _save_sessions(self) -> None:
+        """把会话映射落盘（失败也不影响任务）。"""
+        try:
+            self._store.save_sessions(self._sessions)
+        except Exception:
+            self.logger.debug("[dsh-go] 保存会话映射失败", exc_info=True)
+
+    def _audit_write(self, **fields) -> None:
+        """写一条审计记录（失败静默）。"""
+        if self._audit is None:
+            return
+        try:
+            self._audit.write(**fields)
+        except Exception:
+            pass
+
     async def _session_for(self, key: str, client: DshAcpClient) -> str:
         """取这个聊天对应的 dsh 会话；能续就续，续不上就新建。"""
         existing = self._sessions.get(key)
         if existing and self._conf("keep_context", True):
             if await client.resume_session(existing):
+                self._store.touch_session(self._sessions, key)
                 await self._apply_model(client, existing)
                 return existing
         sid = await client.new_session(self._work_dir())
         self._sessions[key] = sid
+        self._save_sessions()
         await self._apply_model(client, sid)
         return sid
 
@@ -432,6 +458,19 @@ class DshGoPlugin(star.Star):
         await self._shutdown()
 
     # ------------------------------------------------------------------ 跑一个任务
+
+    def _guard(self, task: str) -> str | None:
+        """危险操作拦截。返回提示文案表示已拦下，返回 None 表示放行。"""
+        if not self._conf("danger_guard", True):
+            return None
+        hit = safety.check(task)
+        if hit is None:
+            return None
+        self._audit_write(
+            kind="guard", blocked=True, reason=hit.name, task=task, ok=False
+        )
+        self.logger.warning("[dsh-go] 拦截危险指令：%s", hit.name)
+        return hit.message()
 
     async def _run_task(
         self,
@@ -626,6 +665,19 @@ class DshGoPlugin(star.Star):
 
         key = self._scope_key(event)
 
+        if self._pending_note:
+            note, self._pending_note = self._pending_note, None
+            yield event.plain_result(
+                f"上次有个后台任务没跑完（{note.get('started', '时间未知')}）：\n"
+                f"{note.get('task', '（没记下内容）')}\n"
+                "重启已经把它中断了，需要的话重发一次。"
+            )
+
+        if fact in _HISTORY_FACTS:
+            yield event.plain_result(self._history_text())
+            event.stop_event()
+            return
+
         if fact in _STATUS_FACTS:
             yield event.plain_result(await self._status_text())
             event.stop_event()
@@ -633,6 +685,7 @@ class DshGoPlugin(star.Star):
 
         if fact in _NEW_FACTS:
             self._sessions.pop(key, None)
+            self._save_sessions()
             if self._use_bridge:
                 try:
                     await self._get_bridge().reset(key)
@@ -706,11 +759,19 @@ class DshGoPlugin(star.Star):
             event.stop_event()
             return
 
+        blocked = self._guard(arg)
+        if blocked:
+            yield event.plain_result(blocked)
+            event.stop_event()
+            return
+        task_text = safety.strip_confirm(arg)
+
         self._busy.add(key)
+        started = time.time()
         try:
             yield event.plain_result("收到，交给 dsh-go 了…")
             try:
-                result = await self._run_task(event, arg, key)
+                result = await self._run_task(event, task_text, key)
             except DshNotRunningError as e:
                 yield event.plain_result(f"连不上手机上的 dsh-go：{e}")
                 event.stop_event()
@@ -724,6 +785,17 @@ class DshGoPlugin(star.Star):
                 yield event.plain_result(f"dsh-go 这边异常了：{e}")
                 event.stop_event()
                 return
+            self._audit_write(
+                kind="task",
+                mode="inline",
+                chat=self._scope_key(event),
+                user=_sender_id(event),
+                task=task_text,
+                ok=bool(result.ok),
+                elapsed=round(time.time() - started, 1),
+                tools=result.tool_summary(),
+                error=result.error,
+            )
             yield event.plain_result(self._format(result))
         finally:
             self._busy.discard(key)
@@ -743,6 +815,12 @@ class DshGoPlugin(star.Star):
             yield event.plain_result("这个聊天已经有任务在跑了，先 /dsh 停止 或等它结束。")
             return
 
+        blocked = self._guard(task)
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        task = safety.strip_confirm(task)
+
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         timeout = float(self._conf("timeout_seconds", 420) or 0)
         note = "不限时" if timeout <= 0 else f"最长 {timeout / 60:.0f} 分钟"
@@ -753,33 +831,78 @@ class DshGoPlugin(star.Star):
         )
 
         self._busy.add(key)
+        self._store.set_pending(task, key)
         self._bg[key] = asyncio.create_task(
             self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
         )
 
     async def _run_background(self, key: str, task: str, umo: str) -> None:
         """后台跑一个任务，结束后主动把结果发到聊天。"""
+        ok = False
+        elapsed = 0.0
+        error = ""
         try:
             result = await self._run_task(None, task, key, progress=False)
             text = self._format(result)
+            ok = bool(result.ok)
+            elapsed = round(float(result.elapsed or 0), 1)
+            error = result.error or ""
         except DshNotRunningError as e:
             text = f"后台任务连不上 dsh-go：{e}"
+            error = str(e)
         except DshError as e:
             text = f"后台任务失败：{e}"
+            error = str(e)
         except asyncio.CancelledError:
+            self._audit_write(
+                kind="task", mode="background", chat=key, task=task,
+                ok=False, error="cancelled",
+            )
             raise
         except Exception as e:  # pragma: no cover
             self.logger.exception("[dsh-go] 后台任务异常")
             text = f"后台任务异常：{e}"
+            error = str(e)
         finally:
             self._busy.discard(key)
             self._bg.pop(key, None)
+            self._store.clear_pending()
 
+        self._audit_write(
+            kind="task",
+            mode="background",
+            chat=key,
+            task=task,
+            ok=ok,
+            elapsed=elapsed,
+            error=error,
+        )
         if umo:
             try:
                 await self.context.send_message(umo, MessageChain([Plain(text)]))
             except Exception:
                 self.logger.warning("[dsh-go] 后台结果发送失败", exc_info=True)
+
+    def _history_text(self, count: int = 5) -> str:
+        """最近几次任务摘要（来自审计日志）。"""
+        if self._audit is None:
+            return "审计日志没开，看不到历史。"
+        records = [r for r in self._audit.tail(40) if r.get("kind") == "task"][:count]
+        if not records:
+            return "还没有任务记录。"
+        lines = [f"最近 {len(records)} 次任务："]
+        for r in records:
+            mode = {"inline": "前台", "background": "后台", "tool": "模型自动", "install": "装插件"}.get(
+                str(r.get("mode") or ""), "任务"
+            )
+            status = "✅" if r.get("ok") else "❌"
+            ts = str(r.get("ts") or "")[5:16]
+            task = str(r.get("task") or "").replace("\n", " ")
+            if len(task) > 40:
+                task = task[:40] + "…"
+            extra = f" {r.get('elapsed', 0)}s" if r.get("elapsed") else ""
+            lines.append(f"{status} {ts} [{mode}] {task}{extra}")
+        return "\n".join(lines)
 
     def _tasks_text(self, key: str) -> str:
         running = "在跑" if key in self._bg else "没有"
@@ -826,6 +949,10 @@ class DshGoPlugin(star.Star):
         self._busy.add(key)
         try:
             yield event.plain_result("好，让 dsh-go 写插件去了，写完会自动装上…")
+            blocked = self._guard(requirement)
+            if blocked:
+                yield event.plain_result(blocked)
+                return
             prompt = _INSTALL_PROMPT.format(
                 requirement=requirement,
                 dir=_INSTALL_DIR,
@@ -876,6 +1003,10 @@ class DshGoPlugin(star.Star):
                 yield event.plain_result(f"安装失败：{e}")
                 return
 
+            self._audit_write(
+                kind="task", mode="install", chat=key, user=_sender_id(event),
+                task=requirement, ok=True, plugin=name,
+            )
             yield event.plain_result(
                 f"装好了：{name}\n"
                 f"位置：{plugins_dir}/{name}\n\n"
@@ -953,12 +1084,18 @@ class DshGoPlugin(star.Star):
         if not task:
             return "无法调用 dsh_go：任务内容为空。"
 
+        blocked = self._guard(task)
+        if blocked:
+            return blocked.replace("\n\n", " ").replace("\n", " ")
+        task = safety.strip_confirm(task)
+
         key = self._scope_key(event)
         if background:
             if key in self._busy or key in self._bg:
                 return "这个聊天已经有任务在跑，等它结束或先停止。"
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             self._busy.add(key)
+            self._store.set_pending(task, key)
             self._bg[key] = asyncio.create_task(
                 self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
             )
@@ -978,6 +1115,17 @@ class DshGoPlugin(star.Star):
         finally:
             self._busy.discard(key)
 
+        self._audit_write(
+            kind="task",
+            mode="tool",
+            chat=key,
+            user=_sender_id(event),
+            task=task,
+            ok=bool(result.ok),
+            elapsed=round(float(result.elapsed or 0), 1),
+            tools=result.tool_summary(),
+            error=result.error,
+        )
         if result.error and not result.text:
             return f"dsh-go 出错了：{result.error}"
         out = (result.text or "").strip() or "（dsh-go 跑完了，但没有给出文字内容）"

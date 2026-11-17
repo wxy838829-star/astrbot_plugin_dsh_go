@@ -120,6 +120,7 @@ sh 启动.sh
 | `/dsh 停止` | 打断正在跑的任务 |
 | `/dsh 后台 <任务>` | 后台跑（适合大项目），跑完自动把结果发到聊天 |
 | `/dsh 任务` | 看当前有没有后台任务在跑 |
+| `/dsh 历史` | 最近几次任务做了些什么（来自审计日志） |
 | `/dsh 装插件 <需求>` | 让 dsh-go 现场写一个 AstrBot 插件并自动装上（需开启 `enable_install`） |
 | `/dsh 帮助` | 命令说明 |
 
@@ -162,6 +163,8 @@ sh 启动.sh
 | `session_scope` | `chat` | `chat` 一个群共享上下文，`user` 每人一段 |
 | `show_progress` | 开 | 执行中播报「正在用 xxx」 |
 | `max_reply_chars` | 3500 | 回聊天的最长字数 |
+| `danger_guard` | 开 | 危险操作拦截：命中删根/格式化/刷盘/关机等要求带「确认执行」 |
+| `max_sessions` | 50 | 最多记住多少段聊天的上下文 |
 | `nl_trigger` | 开 | 允许「用 dsh …」这类自然语言直接触发 |
 | `enable_install` | 关 | 允许 `/dsh 装插件`（会让 dsh-go 写代码并装进 AstrBot，风险自负） |
 | `install_max_mb` | 16 | 自动装插件时插件包大小上限 |
@@ -267,3 +270,43 @@ timeout_seconds = 0        # 0 表示不限时
 
 > 后台任务靠内存里的 asyncio task 维持。**AstrBot 重启会丢**，
 > 所以超长任务（几小时）建议拆成几个阶段，一段一段跑。
+
+## 安全与可靠性
+
+### 危险操作拦截（`danger_guard`）
+
+插件把聊天消息变成命令执行，所以有一道闸。命中下面这类模式时**不会执行**，
+会让你在指令里带「确认执行」再重发：
+
+- 删根目录 / 删家目录（`rm -rf /`、`rm -rf ~`）
+- 格式化、分区（`mkfs`、`fdisk`、`parted`）
+- 直接写块设备（`dd of=/dev/...`、`> /dev/sda`）
+- 递归改根权限（`chmod -R 777 /`）
+- fork 炸弹
+- 关机 / 重启
+- `curl ... | bash` 这类下载即执行
+
+正常操作不受影响：`rm -rf /sdcard/Download/tmp` 这种带具体路径的照常执行。
+觉得误报了可以在配置里关掉 `danger_guard`。
+
+### 审计日志
+
+每个任务都会在
+`<AstrBot>/data/plugin_data/astrbot_plugin_dsh_go/audit.jsonl` 记一行：
+
+```json
+{"ts": "2026-11-17 10:10:28", "kind": "task", "mode": "inline",
+ "chat": "...", "user": "42", "task": "只回复三个字：审计中",
+ "ok": true, "elapsed": 1.3, "tools": ""}
+```
+
+- 被拦下的危险指令记为 `kind: "guard"`
+- 超过 1 MB 自动轮转为 `audit.jsonl.1`
+- 随时用 `/dsh 历史` 在聊天里看最近几次
+
+### 状态持久化
+
+- **会话映射**存 `<AstrBot>/data/plugin_data/astrbot_plugin_dsh_go/sessions.json`，
+  AstrBot 重启后上下文还能接上
+- **后台任务**开始时写一个 `pending.json` 标记，跑完删除。如果重启打断了，
+  下次发指令时会提醒你「上次那个后台任务没跑完」并说明内容

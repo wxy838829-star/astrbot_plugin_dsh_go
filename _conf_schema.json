@@ -61,6 +61,16 @@
     "type": "bool",
     "default": true
   },
+  "danger_guard": {
+    "description": "危险操作拦截：命中删除根目录、格式化、刷盘、关机这类模式时，要求指令里带「确认执行」才放行",
+    "type": "bool",
+    "default": true
+  },
+  "max_sessions": {
+    "description": "最多记住多少段聊天的上下文（超过后淘汰最久没用的），纯内存+落盘",
+    "type": "int",
+    "default": 50
+  },
   "enable_install": {
     "description": "允许 /dsh 装插件：让 dsh-go 写一个插件并自动装进 AstrBot。风险较高，默认关闭",
     "type": "bool",
