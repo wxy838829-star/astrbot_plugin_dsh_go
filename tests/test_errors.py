@@ -27,3 +27,15 @@ def test_unknown_passthrough():
 def test_with_detail_keeps_original():
     out = friendly_with_detail("Cannot connect to host 127.0.0.1:6799")
     assert "桥接服务没在运行" in out and "原始信息" in out
+
+
+def test_insufficient_balance():
+    assert "余额不足" in friendly("Internal error: turn failed: Insufficient Balance")
+
+
+def test_rate_limit():
+    assert "限流" in friendly("429 too many requests")
+
+
+def test_context_too_long():
+    assert "上下文超长" in friendly("maximum context length exceeded")

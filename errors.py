@@ -43,6 +43,18 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"鉴权失败|401 Unauthorized|invalid_api_key", re.I),
         "模型渠道鉴权失败，检查 API Key 是否过期",
     ),
+    (
+        re.compile(r"Insufficient Balance|insufficient_quota|余额不足|quota exceeded", re.I),
+        "模型账户余额不足，去对应渠道充值后再试",
+    ),
+    (
+        re.compile(r"rate limit|429|too many requests|请求过于频繁", re.I),
+        "模型渠道限流了，等一会儿再试，或降到并发数",
+    ),
+    (
+        re.compile(r"context length|too many tokens|超过.*长度", re.I),
+        "上下文超长了，发 /dsh 新对话 开一段新的再试",
+    ),
 ]
 
 

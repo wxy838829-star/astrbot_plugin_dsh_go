@@ -350,6 +350,35 @@ QQ 不渲染 Markdown，所以插件会先整理再发：
 以前「哪个聊天在跑」存在两处（`_busy` 集合 + `_bg` 字典），改代码时容易漏判。
 现在统一成一张登记表，`/dsh 任务` 和空闲回收都读同一份。
 
+## 代码结构
+
+按职责拆成多个文件（原来 `main.py` 一个文件 1300 行）：
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `main.py` | ~360 | 插件类、配置、handler 注册（**必须在主模块注册**，见下） |
+| `commands.py` | ~510 | 聊天侧入口：指令、自然语言、后台任务、装插件 |
+| `engine.py` | ~246 | 引擎与会话：启动子进程、恢复会话、空闲回收 |
+| `tasks.py` | ~212 | 任务执行：跑指令、并发控制、进度播报、结果格式化 |
+| `dsh_client.py` | ~690 | ACP 协议客户端 |
+| `bridge_client.py` | ~253 | 桥接模式 HTTP 客户端 |
+| `formatting.py` | ~209 | Markdown → 纯文本 + 长文本切片 |
+| `plugin_installer.py` | ~174 | 插件包安装与 zip slip 防护 |
+| `store.py` | ~116 | 会话映射与后台任务标记持久化 |
+| `audit.py` | ~96 | 任务审计日志 |
+| `errors.py` | ~81 | 异常翻译成人话 |
+| `safety.py` | ~75 | 危险命令拦截 |
+| `constants.py` | ~56 | 命令词与固定提示词 |
+| `helpers.py` | ~50 | 小工具函数 |
+| `texts.py` | ~17 | 给用户看的文案 |
+
+`commands.py` / `engine.py` / `tasks.py` 是 Mixin，由 `DshGoPlugin` 多继承。
+
+> ⚠️ **一个容易踩的坑**：AstrBot 按 handler 的 `__module__` 与插件的
+> `module_path` 匹配来决定绑哪个实例。所以带 `@filter.command` / `@filter.regex`
+> 的入口**必须定义在 main.py 里**，放进 Mixin 会拿不到 `self`，调用时直接报错。
+> Mixin 里只放普通方法（如 `run_command`），主模块里放薄壳注册。
+
 ## 开发与测试
 
 ```sh
