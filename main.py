@@ -81,6 +81,13 @@ _NEW_FACTS = ("新对话", "新会话", "新话题", "new", "reset")
 _STOP_FACTS = ("停止", "stop", "取消", "cancel", "中断")
 _HELP_FACTS = ("帮助", "help", "?", "？")
 _INSTALL_FACTS = ("装插件", "安装插件", "install")
+# 自然语言触发：用 dsh / 让 dsh / 用 dsh 后台 …
+_NL_PATTERN = (
+    r"(?i)^\s*(?:请|麻烦)?\s*(?:帮我|帮忙)?\s*"
+    r"(?:用|让|叫|通过)\s*dsh(?:-?go)?\s*"
+    r"(?P<bg>后台|bg)?\s*(?:帮我|帮忙|给我|去|来|干|做)?\s*[：:，,、]?\s*(?P<task>.+)$"
+)
+
 _BG_FACTS = ("后台", "bg", "background")
 _TASKS_FACTS = ("任务", "tasks", "后台任务")
 
@@ -108,6 +115,13 @@ class DshGoPlugin(star.Star):
         self._busy: set[str] = set()   # 哪个聊天正在跑（用于去重提示）
         self._inflight = 0             # 真正在跑的任务数（用于空闲回收判断）
         self._bg: dict[str, asyncio.Task] = {}  # 后台任务：聊天键 -> task
+        self._nl_re = None
+        try:
+            import re as _re
+
+            self._nl_re = _re.compile(_NL_PATTERN)
+        except Exception:  # pragma: no cover
+            self.logger.warning("[dsh-go] 自然语言触发正则编译失败，已禁用")
         self._idle_task: asyncio.Task | None = None
         self._starting: asyncio.Task | None = None
         self._closed = False
@@ -560,6 +574,41 @@ class DshGoPlugin(star.Star):
         async for item in self._handle_command(event, str(arg or "")):
             yield item
 
+    @filter.regex(_NL_PATTERN)
+    async def nl_trigger(self, event: AstrMessageEvent):
+        """自然对话触发：「用 dsh 帮我…」「让 dsh 后台…」。
+
+        正则过滤器不受唤醒前缀约束，所以这里必须自己检查是不是被叫到了，
+        否则群里随便谁提一句 dsh 都会触发。
+        """
+        if self._nl_re is None or not self._conf("nl_trigger", True):
+            return
+        if not getattr(event, "is_at_or_wake_command", False):
+            return
+        m = self._nl_re.match((event.message_str or "").strip())
+        if not m:
+            return
+        # 权限不够就静默，别在群里刷拒绝提示
+        allowed, _reason = self._allow(event)
+        if not allowed:
+            return
+
+        task = (m.group("task") or "").strip()
+        if not task:
+            yield event.plain_result("想让 dsh 做什么？说具体一点，例如：用 dsh 帮我看看下载目录有多满")
+            event.stop_event()
+            return
+
+        key = self._scope_key(event)
+        is_bg = bool(m.group("bg"))
+        if is_bg:
+            async for item in self._handle_background(event, key, task):
+                yield item
+        else:
+            async for item in self._handle_command(event, task):
+                yield item
+        event.stop_event()
+
     async def _handle_command(self, event: AstrMessageEvent, arg: str):
         allowed, reason = self._allow(event)
         if not allowed:
@@ -886,11 +935,14 @@ class DshGoPlugin(star.Star):
     # ------------------------------------------------------------------ LLM 工具
 
     @filter.llm_tool(name="dsh_go")
-    async def dsh_go_tool(self, event: AstrMessageEvent, task: str):
-        """把任务交给手机上更强的 dsh-go 智能体去执行，用于当前聊天机器人做不到的事：读写文件、执行命令、查网页、看代码仓库。
+    async def dsh_go_tool(
+        self, event: AstrMessageEvent, task: str, background: bool = False
+    ):
+        """把任务交给手机上更强的 dsh-go 智能体去执行，用于当前聊天机器人做不到的事：读写文件、执行命令、查网页、看代码仓库。用户说「用 dsh」「让 dsh 帮我」时优先调用它。
 
         Args:
             task(string): 要完整交给 dsh-go 执行的任务，写清目标、涉及的文件路径和约束，它会独立完成后返回结果
+            background(boolean): 任务预计要跑很久（大项目、跑测试、批量处理）时设为 true，会转到后台执行，跑完自动把结果发到聊天；普通小任务留空即可
         """
         if not self._conf("enable_llm_tool", True):
             return "dsh_go 工具已在插件配置里关闭。"
@@ -902,6 +954,15 @@ class DshGoPlugin(star.Star):
             return "无法调用 dsh_go：任务内容为空。"
 
         key = self._scope_key(event)
+        if background:
+            if key in self._busy or key in self._bg:
+                return "这个聊天已经有任务在跑，等它结束或先停止。"
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            self._busy.add(key)
+            self._bg[key] = asyncio.create_task(
+                self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
+            )
+            return "已转到后台执行，跑完会自动把结果发到这个聊天。"
         if key in self._busy:
             return "dsh-go 正在处理上一条任务，请稍后再调用。"
         self._busy.add(key)

@@ -56,6 +56,11 @@
     "type": "bool",
     "default": true
   },
+  "nl_trigger": {
+    "description": "允许自然对话触发：消息以「用 dsh」「让 dsh 帮我」「用 dsh 后台」开头时直接执行，不用打 /dsh。仍受管理员与白名单限制",
+    "type": "bool",
+    "default": true
+  },
   "enable_install": {
     "description": "允许 /dsh 装插件：让 dsh-go 写一个插件并自动装进 AstrBot。风险较高，默认关闭",
     "type": "bool",
