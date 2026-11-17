@@ -155,7 +155,9 @@ sh 启动.sh
 | `work_dir` | `~` | dsh-go 的工作目录 |
 | `permission_mode` | `danger-full-access` | 手机 proot 无沙箱后端，只能是这个 |
 | `env_api_keys` | 空 | 补 `KEY=VALUE`，每行一个 |
-| `model` | 空 | 指定 `渠道/模型`，留空用默认 |
+| `model` | 空 | 指定 `渠道/模型`，如 `custom-worldcode/deepseek-v4.1-flash-1017`。**留空会用 dsh 的默认模型**，可能是 deepseek 官方，余额不足会失败 |
+| `api_key` | 空 | 模型渠道的 API 密钥。留空则用 dsh 自己配好的 |
+| `api_key_env` | `CUSTOM_WORLDCODE_API_KEY` | 上面密钥对应的环境变量名（要和 dsh 渠道配置里的一致） |
 | `auto_approve` | 开 | 自动同意 dsh-go 的权限请求 |
 | `enable_llm_tool` | 开 | 允许聊天模型自动调用 |
 | `admin_only` | 开 | 只允许 AstrBot 管理员 |
@@ -272,6 +274,28 @@ timeout_seconds = 0        # 0 表示不限时
 
 > 后台任务靠内存里的 asyncio task 维持。**AstrBot 重启会丢**，
 > 所以超长任务（几小时）建议拆成几个阶段，一段一段跑。
+
+## 模型与密钥（重要）
+
+插件支持在配置里直接指定模型和 API 密钥，**不用去改 dsh 的配置文件**。
+
+| 配置项 | 例子 | 说明 |
+| --- | --- | --- |
+| `model` | `custom-worldcode/deepseek-v4.1-flash-1017` | 渠道名/模型名 |
+| `api_key_env` | `CUSTOM_WORLDCODE_API_KEY` | 环境变量名，要和 dsh 渠道配置对得上 |
+| `api_key` | `sk-xxxx…` | 实际密钥 |
+
+工作方式：
+
+- **本机模式**：插件把密钥注入给 dsh 子进程的环境变量
+- **桥接模式**：插件把模型和密钥随请求带给桥接服务，桥接发现密钥变了就
+  **重建 dsh 引擎**（进程环境变量建好后就改不了），再注入新密钥并设置模型
+
+> ⚠️ **为什么一定要配 `model`**
+>
+> dsh 的 `acp` profile 默认走 `deepseek-official`，这个渠道如果没充值，
+> 每条指令都会报 `Insufficient Balance`。即使你在 dsh 的 web 配置里设了别的
+> 默认模型，走 ACP 时也不一定生效——**所以这里显式指定最稳**。
 
 ## 安全与可靠性
 
@@ -406,6 +430,19 @@ python -m pytest tests -q
 ---
 
 ## 更新日志
+
+### 1.3.0
+
+**新增**
+- 可在插件配置里直接指定模型和 API 密钥（`model` / `api_key_env` / `api_key`），
+  不用再改 dsh 的配置文件
+- 桥接模式支持随请求传递密钥：密钥变化时自动重建引擎并注入
+
+**修复**
+- **`model` 配置项一直没生效**：`set_model_for` 生成的 JSON 带空格
+  （`["p", "m"]`），而引擎按字符串精确匹配 `["p","m"]`，直接报
+  `unknown model option`。改用紧凑分隔符后正常
+- 同步修复桥接目录里残留的旧版 `dsh_client.py`
 
 ### 1.2.2
 

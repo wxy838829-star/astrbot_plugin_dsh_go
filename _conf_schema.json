@@ -42,9 +42,19 @@
     "default": ""
   },
   "model": {
-    "description": "【仅本机模式】指定模型，写 渠道/模型；留空用默认",
+    "description": "指定模型，写 渠道/模型，如 custom-worldcode/deepseek-v4.1-flash-1017。留空用 dsh 的默认（注意 dsh 默认可能是 deepseek 官方，余额不足会失败）",
     "type": "string",
     "default": ""
+  },
+  "api_key": {
+    "description": "模型渠道的 API 密钥。填了会注入给 dsh 子进程；桥接模式下随请求转给桥接服务。留空则用 dsh 自己配好的",
+    "type": "string",
+    "default": ""
+  },
+  "api_key_env": {
+    "description": "上面这个密钥对应的环境变量名，例如 CUSTOM_WORLDCODE_API_KEY。填错会导致模型鉴权失败",
+    "type": "string",
+    "default": "CUSTOM_WORLDCODE_API_KEY"
   },
   "auto_approve": {
     "description": "【仅本机模式】自动同意 dsh-go 的权限请求",

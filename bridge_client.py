@@ -189,11 +189,23 @@ class BridgeClient:
             raise BridgeError(friendly(str(e))) from e
 
     async def ask(
-        self, text: str, session_key: str, timeout: float | None = None
+        self,
+        text: str,
+        session_key: str,
+        timeout: float | None = None,
+        model: str = "",
+        api_key: str = "",
+        api_key_env: str = "",
     ) -> BridgeResult:
         payload: dict = {"text": text, "session": session_key}
         if timeout is not None:
             payload["timeout"] = timeout
+        # 桥接模式下模型和密钥都归桥接那侧的 dsh 管，这里随请求带过去
+        if model:
+            payload["model"] = model
+        if api_key:
+            payload["api_key"] = api_key
+            payload["api_key_env"] = api_key_env or "CUSTOM_WORLDCODE_API_KEY"
         data = await self._post("/ask", payload)
         return BridgeResult(
             ok=bool(data.get("ok")),

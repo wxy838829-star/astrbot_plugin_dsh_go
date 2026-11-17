@@ -55,6 +55,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "permission_mode": "danger-full-access",
     "env_api_keys": "",
     "model": "",
+    "api_key": "",
+    "api_key_env": "CUSTOM_WORLDCODE_API_KEY",
     "auto_approve": True,
     "enable_llm_tool": True,
     "admin_only": True,
@@ -160,6 +162,13 @@ class DshGoPlugin(CommandsMixin, TasksMixin, EngineMixin, star.Star):
         mode = str(self._conf("permission_mode", "danger-full-access") or "").strip()
         if mode:
             env["DSH_PERMISSION_MODE"] = mode
+
+        # 单条 API 密钥：填了就直接注入（优先于 env_api_keys 里的同名项）
+        api_key = str(self._conf("api_key", "") or "").strip()
+        api_key_env = str(self._conf("api_key_env", "") or "").strip()
+        if api_key and api_key_env:
+            env[api_key_env] = api_key
+
         raw = str(self._conf("env_api_keys", "") or "")
         for line in raw.replace(",", "\n").replace(";", "\n").splitlines():
             line = line.strip()

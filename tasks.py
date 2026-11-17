@@ -97,7 +97,14 @@ class TasksMixin:
         timeout = float(self._conf("timeout_seconds", 420) or 0)
         self._inflight += 1
         try:
-            data = await bridge.ask(text, key, timeout=timeout)
+            data = await bridge.ask(
+                text,
+                key,
+                timeout=timeout,
+                model=str(self._conf("model", "") or ""),
+                api_key=str(self._conf("api_key", "") or ""),
+                api_key_env=str(self._conf("api_key_env", "") or ""),
+            )
         except BridgeError as e:
             raise DshError(str(e)) from e
         finally:
