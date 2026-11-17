@@ -71,6 +71,16 @@
     "type": "int",
     "default": 50
   },
+  "max_parallel": {
+    "description": "同时最多跑几个任务（跨所有聊天）。手机扛不住太多并发，建议 2；设 0 表示不限制",
+    "type": "int",
+    "default": 2
+  },
+  "ack_after_seconds": {
+    "description": "任务超过多少秒还没结束才回一句「还在跑」。设 0 表示从不提示（快任务不刷屏）",
+    "type": "int",
+    "default": 5
+  },
   "enable_install": {
     "description": "允许 /dsh 装插件：让 dsh-go 写一个插件并自动装进 AstrBot。风险较高，默认关闭",
     "type": "bool",
@@ -112,9 +122,9 @@
     "default": true
   },
   "max_reply_chars": {
-    "description": "回给聊天的内容最多多少字，超出会截断",
+    "description": "单条消息最多多少字。超出会自动按段落切成多条发送，不会硬截断；代码块会保持完整",
     "type": "int",
-    "default": 3500
+    "default": 1800
   },
   "timeout_seconds": {
     "description": "单个任务最长等多久（秒）。设为 0 表示不限时（写大项目用，注意任务会一直占着）。后台任务同样适用",

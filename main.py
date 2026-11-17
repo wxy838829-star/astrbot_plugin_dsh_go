@@ -18,6 +18,7 @@ import asyncio
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from astrbot.api import star
@@ -25,7 +26,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
 
-from . import plugin_installer, safety
+from . import formatting, plugin_installer, safety
 from .audit import AuditLog, default_audit_dir
 from .store import StateStore
 from .bridge_client import BridgeClient, BridgeError
@@ -100,6 +101,16 @@ _INSTALL_DIR = "/root/workspace/_plugins"
 _INSTALL_ZIP = _INSTALL_DIR + "/out.zip"
 
 
+@dataclass
+class RunningTask:
+    """一条正在跑的任务。"""
+
+    kind: str            # inline / background
+    text: str = ""
+    task: asyncio.Task | None = None
+    started: float = 0.0
+
+
 class DshGoPlugin(star.Star):
     """把聊天指令转给手机上的 dsh-go，并把结果发回聊天。"""
 
@@ -120,9 +131,14 @@ class DshGoPlugin(star.Star):
         self._audit = AuditLog(str(self._store.base_dir / "audit.jsonl")) if data_dir else None
         self._sessions: dict[str, str] = self._store.load_sessions()
         self._pending_note = self._store.take_pending() if self._store else None
-        self._busy: set[str] = set()   # 哪个聊天正在跑（用于去重提示）
+        # 统一的任务登记表：key -> RunningTask(kind, task, started, text)
+        # 以前用 _busy + _bg 两套状态，容易不一致（改空闲回收时踩过），现在合成一份
+        self._running: dict[str, RunningTask] = {}
+        max_parallel = int(self._conf("max_parallel", 2) or 0)
+        self._sem: asyncio.Semaphore | None = (
+            asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
+        )
         self._inflight = 0             # 真正在跑的任务数（用于空闲回收判断）
-        self._bg: dict[str, asyncio.Task] = {}  # 后台任务：聊天键 -> task
         self._nl_re = None
         try:
             import re as _re
@@ -324,6 +340,21 @@ class DshGoPlugin(star.Star):
         await client.stop()
         raise DshError("插件已卸载，启动被取消")
 
+    # ------------------------------------------------------------------ 任务登记
+
+    def _is_running(self, key: str) -> bool:
+        return key in self._running
+
+    def _begin_task(self, key: str, kind: str, text: str = "", task=None) -> None:
+        """登记一个正在跑的任务（调用方保证不会重复登记）。"""
+        self._running[key] = RunningTask(kind=kind, text=text, task=task, started=time.time())
+
+    def _end_task(self, key: str) -> None:
+        self._running.pop(key, None)
+
+    def _background_tasks(self) -> list[tuple[str, RunningTask]]:
+        return [(k, v) for k, v in self._running.items() if v.kind == "background" and v.task]
+
     def _save_sessions(self) -> None:
         """把会话映射落盘（失败也不影响任务）。"""
         try:
@@ -402,7 +433,7 @@ class DshGoPlugin(star.Star):
             client = self._client
             if client is None or not client.alive:
                 return False
-            if self._inflight > 0 or self._busy:
+            if self._inflight > 0 or self._running:
                 return False
             if client.idle_seconds() < idle_seconds:
                 return False
@@ -429,7 +460,7 @@ class DshGoPlugin(star.Star):
 
     async def _shutdown(self) -> None:
         self._closed = True
-        for key in list(self._bg):
+        for key, _ in self._background_tasks():
             try:
                 await self._cancel_background(key)
             except Exception:
@@ -473,6 +504,22 @@ class DshGoPlugin(star.Star):
         return hit.message()
 
     async def _run_task(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        key: str,
+        progress: bool = True,
+    ) -> PromptResult:
+        if self._sem is None:
+            return await self._run_task_locked(event, text, key, progress)
+
+        queued = self._sem.locked()
+        if queued:
+            self.logger.info("[dsh-go] 并发已满，排队等待：%s", key)
+        async with self._sem:
+            return await self._run_task_locked(event, text, key, progress)
+
+    async def _run_task_locked(
         self,
         event: AstrMessageEvent,
         text: str,
@@ -580,30 +627,67 @@ class DshGoPlugin(star.Star):
         except Exception:
             self.logger.debug("[dsh-go] 发送进度消息失败", exc_info=True)
 
-    def _format(self, result: PromptResult) -> str:
-        limit = int(self._conf("max_reply_chars", 3500) or 3500)
+    def _start_ack(self, event: AstrMessageEvent, key: str) -> asyncio.Task | None:
+        """慢任务才发一句「还在跑」。
+
+        以前不管快慢都先回一句「收到」，群里很吵；现在超过 ack_after_seconds
+        还没结束才补一句话。
+        """
+        after = float(self._conf("ack_after_seconds", 5) or 0)
+        if after <= 0:
+            return None
+        if self._sem is not None and self._sem.locked():
+            text = "前面还有任务在跑，你这条已排队，开始处理时我会继续。"
+        else:
+            text = "还在跑，结果出来我马上发。"
+        return asyncio.create_task(self._ack_later(event, after, text), name="dsh-go-ack")
+
+    async def _ack_later(self, event: AstrMessageEvent, after: float, text: str) -> None:
+        try:
+            await asyncio.sleep(after)
+            await self._send_quiet(event, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.debug("[dsh-go] 发送等待提示失败", exc_info=True)
+
+    async def _stop_ack(self, ack: asyncio.Task | None) -> None:
+        if ack is None or ack.done():
+            return
+        ack.cancel()
+        try:
+            await asyncio.gather(ack, return_exceptions=True)
+        except Exception:
+            pass
+
+    def _format(self, result: PromptResult) -> list[str]:
+        """把结果整理成适合发到聊天里的若干段（Markdown → 纯文本 + 安全切片）。"""
+        limit = int(self._conf("max_reply_chars", 1800) or 1800)
         body = (result.text or "").strip()
         if result.error:
             if result.timed_out:
                 hint = f"dsh-go 跑了 {result.elapsed:.0f} 秒还没结束，我先不等了。"
                 if body:
-                    return f"{body}\n\n（{hint}可以发 /dsh 停止，或把 timeout_seconds 调大）"[:limit]
-                return (
+                    return formatting.split_message(
+                        formatting.to_plain(body) + f"\n\n（{hint}可以发 /dsh 停止，或把 timeout_seconds 调大）",
+                        limit,
+                    )
+                return [
                     f"{hint}任务可能还在后台跑，发 /dsh 停止 可以中断；"
                     f"也可以把插件配置 timeout_seconds 调大。"
-                )[:limit]
+                ]
             if body:
-                return f"{body}\n\n（dsh-go 没正常收尾：{result.error}）"[:limit]
-            return f"dsh-go 这边出错了：{result.error}"[:limit]
+                return formatting.split_message(
+                    formatting.to_plain(body) + f"\n\n（dsh-go 没正常收尾：{result.error}）", limit
+                )
+            return [f"dsh-go 这边出错了：{result.error}"[:limit]]
         if not body:
             tools = result.tool_summary()
-            return (
-                "dsh-go 跑完了，但没有文字回复。"
-                + (f"\n用到的工具：{tools}" if tools else "")
-            )[:limit]
-        if len(body) > limit:
-            body = body[: max(0, limit - 20)].rstrip() + "\n…（结果太长，已截断）"
-        return body
+            text = "dsh-go 跑完了，但没有文字回复。"
+            if tools:
+                text += f"\n用到的工具：{tools}"
+            return [text]
+        return formatting.split_message(formatting.to_plain(body), limit)
 
     # ------------------------------------------------------------------ 指令
 
@@ -754,7 +838,7 @@ class DshGoPlugin(star.Star):
             event.stop_event()
             return
 
-        if key in self._busy:
+        if self._is_running(key):
             yield event.plain_result("上一条还在跑，等它结束，或者发 /dsh 停止。")
             event.stop_event()
             return
@@ -766,10 +850,10 @@ class DshGoPlugin(star.Star):
             return
         task_text = safety.strip_confirm(arg)
 
-        self._busy.add(key)
+        self._begin_task(key, "inline", task_text)
         started = time.time()
+        ack = self._start_ack(event, key)
         try:
-            yield event.plain_result("收到，交给 dsh-go 了…")
             try:
                 result = await self._run_task(event, task_text, key)
             except DshNotRunningError as e:
@@ -796,9 +880,11 @@ class DshGoPlugin(star.Star):
                 tools=result.tool_summary(),
                 error=result.error,
             )
-            yield event.plain_result(self._format(result))
+            for chunk in self._format(result):
+                yield event.plain_result(chunk)
         finally:
-            self._busy.discard(key)
+            await self._stop_ack(ack)
+            self._end_task(key)
         event.stop_event()
 
     # ------------------------------------------------------------------ 后台任务
@@ -811,7 +897,7 @@ class DshGoPlugin(star.Star):
                 "/dsh 后台 把 /root/workspace/我的项目 的测试跑一遍，失败的修到全过"
             )
             return
-        if key in self._busy or key in self._bg:
+        if self._is_running(key):
             yield event.plain_result("这个聊天已经有任务在跑了，先 /dsh 停止 或等它结束。")
             return
 
@@ -830,11 +916,11 @@ class DshGoPlugin(star.Star):
             "中途想停就发 /dsh 停止。"
         )
 
-        self._busy.add(key)
-        self._store.set_pending(task, key)
-        self._bg[key] = asyncio.create_task(
+        bg_task = asyncio.create_task(
             self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
         )
+        self._begin_task(key, "background", task, task=bg_task)
+        self._store.set_pending(task, key)
 
     async def _run_background(self, key: str, task: str, umo: str) -> None:
         """后台跑一个任务，结束后主动把结果发到聊天。"""
@@ -848,10 +934,10 @@ class DshGoPlugin(star.Star):
             elapsed = round(float(result.elapsed or 0), 1)
             error = result.error or ""
         except DshNotRunningError as e:
-            text = f"后台任务连不上 dsh-go：{e}"
+            text = [f"后台任务连不上 dsh-go：{e}"]
             error = str(e)
         except DshError as e:
-            text = f"后台任务失败：{e}"
+            text = [f"后台任务失败：{e}"]
             error = str(e)
         except asyncio.CancelledError:
             self._audit_write(
@@ -861,11 +947,10 @@ class DshGoPlugin(star.Star):
             raise
         except Exception as e:  # pragma: no cover
             self.logger.exception("[dsh-go] 后台任务异常")
-            text = f"后台任务异常：{e}"
+            text = [f"后台任务异常：{e}"]
             error = str(e)
         finally:
-            self._busy.discard(key)
-            self._bg.pop(key, None)
+            self._end_task(key)
             self._store.clear_pending()
 
         self._audit_write(
@@ -878,10 +963,12 @@ class DshGoPlugin(star.Star):
             error=error,
         )
         if umo:
-            try:
-                await self.context.send_message(umo, MessageChain([Plain(text)]))
-            except Exception:
-                self.logger.warning("[dsh-go] 后台结果发送失败", exc_info=True)
+            for chunk in text:
+                try:
+                    await self.context.send_message(umo, MessageChain([Plain(chunk)]))
+                except Exception:
+                    self.logger.warning("[dsh-go] 后台结果发送失败", exc_info=True)
+                    break
 
     def _history_text(self, count: int = 5) -> str:
         """最近几次任务摘要（来自审计日志）。"""
@@ -905,10 +992,10 @@ class DshGoPlugin(star.Star):
         return "\n".join(lines)
 
     def _tasks_text(self, key: str) -> str:
-        running = "在跑" if key in self._bg else "没有"
+        running = "在跑" if self._is_running(key) else "没有"
         lines = [f"后台任务：{running}"]
-        if len(self._bg) > 1:
-            lines.append(f"（其它聊天还有 {len(self._bg) - 1} 个在跑）")
+        if len(self._running) > 1:
+            lines.append(f"（其它聊天还有 {len(self._running) - 1} 个在跑）")
         timeout = float(self._conf("timeout_seconds", 420) or 0)
         lines.append(
             "单任务超时：" + ("不限时" if timeout <= 0 else f"{timeout / 60:.0f} 分钟")
@@ -916,14 +1003,24 @@ class DshGoPlugin(star.Star):
         return "\n".join(lines)
 
     async def _cancel_background(self, key: str) -> bool:
-        task = self._bg.get(key)
-        if task is None or task.done():
+        entry = self._running.get(key)
+        if entry is None or entry.kind != "background" or entry.task is None:
+            return False
+        task = entry.task
+        if task.done():
             return False
         task.cancel()
         try:
             await asyncio.gather(task, return_exceptions=True)
         except Exception:
             pass
+        # 本地取消了还不够：桥接那边也要明确停掉，否则会话一直占着，
+        # 下一条指令会收到「上一条任务还在跑」。
+        if self._use_bridge:
+            try:
+                await self._get_bridge().stop(key)
+            except Exception:
+                self.logger.debug("[dsh-go] 通知桥接停止任务失败", exc_info=True)
         return True
 
     # ------------------------------------------------------------------ 装插件
@@ -942,11 +1039,11 @@ class DshGoPlugin(star.Star):
                 "要写什么样的插件？例如：\n/dsh 装插件 一个 /echo 指令，把用户说的内容重复一遍"
             )
             return
-        if key in self._busy:
+        if self._is_running(key):
             yield event.plain_result("上一条还在跑，等它结束再来。")
             return
 
-        self._busy.add(key)
+        self._begin_task(key, "inline", requirement)
         try:
             yield event.plain_result("好，让 dsh-go 写插件去了，写完会自动装上…")
             blocked = self._guard(requirement)
@@ -1014,7 +1111,7 @@ class DshGoPlugin(star.Star):
                 "列表里没有它，也就没有可点的重载按钮）。重启后它就会出现在插件管理里。"
             )
         finally:
-            self._busy.discard(key)
+            self._end_task(key)
 
     async def _fetch_install_zip(self) -> bytes:
         """把 dsh-go 侧生成的 zip 取回来。"""
@@ -1091,18 +1188,18 @@ class DshGoPlugin(star.Star):
 
         key = self._scope_key(event)
         if background:
-            if key in self._busy or key in self._bg:
+            if self._is_running(key):
                 return "这个聊天已经有任务在跑，等它结束或先停止。"
             umo = str(getattr(event, "unified_msg_origin", "") or "")
-            self._busy.add(key)
-            self._store.set_pending(task, key)
-            self._bg[key] = asyncio.create_task(
+            bg_task = asyncio.create_task(
                 self._run_background(key, task, umo), name=f"dsh-go-bg-{key}"
             )
+            self._begin_task(key, "background", task, task=bg_task)
+            self._store.set_pending(task, key)
             return "已转到后台执行，跑完会自动把结果发到这个聊天。"
-        if key in self._busy:
+        if self._is_running(key):
             return "dsh-go 正在处理上一条任务，请稍后再调用。"
-        self._busy.add(key)
+        self._begin_task(key, "inline", task)
         try:
             result = await self._run_task(event, task, key, progress=False)
         except DshNotRunningError as e:
@@ -1113,7 +1210,7 @@ class DshGoPlugin(star.Star):
             self.logger.exception("[dsh-go] 工具调用异常")
             return f"dsh-go 这边异常了：{e}"
         finally:
-            self._busy.discard(key)
+            self._end_task(key)
 
         self._audit_write(
             kind="task",
@@ -1128,7 +1225,7 @@ class DshGoPlugin(star.Star):
         )
         if result.error and not result.text:
             return f"dsh-go 出错了：{result.error}"
-        out = (result.text or "").strip() or "（dsh-go 跑完了，但没有给出文字内容）"
+        out = formatting.to_plain((result.text or "").strip()) or "（dsh-go 跑完了，但没有给出文字内容）"
         tools = result.tool_summary()
         if tools:
             out += f"\n\n[用到的工具：{tools}]"
