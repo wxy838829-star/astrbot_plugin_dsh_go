@@ -197,9 +197,11 @@ class TasksMixin:
                 ]
             if body:
                 return formatting.split_message(
-                    formatting.to_plain(body) + f"\n\n（dsh-go 没正常收尾：{result.error}）", limit
+                    formatting.to_plain(body)
+                    + f"\n\n（dsh-go 没正常收尾：{errmsg.friendly(result.error)}）",
+                    limit,
                 )
-            return [f"dsh-go 这边出错了：{result.error}"[:limit]]
+            return [f"dsh-go 这边出错了：{errmsg.friendly_with_detail(result.error)}"[:limit]]
         if not body:
             tools = result.tool_summary()
             text = "dsh-go 跑完了，但没有文字回复。"

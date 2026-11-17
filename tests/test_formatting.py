@@ -49,3 +49,16 @@ def test_split_respects_limit():
 def test_short_text_untouched():
     assert split_message("短消息", 300) == ["短消息"]
     assert split_message("", 300) == []
+
+
+def test_format_translates_error():
+    """余额不足这类错误应翻译成中文，而不是原样糊给用户。"""
+    import json, sys, types
+    from pathlib import Path
+    # 直接测 errors 层，避免构造整个插件
+    from astrbot_plugin_dsh_go.errors import friendly, friendly_with_detail
+
+    raw = "Internal error: turn failed: Insufficient Balance (request_id: xxx) (-32603)"
+    assert "余额不足" in friendly(raw), "余额不足未翻译"
+    out = friendly_with_detail(raw)
+    assert "余额不足" in out and "原始信息" in out
